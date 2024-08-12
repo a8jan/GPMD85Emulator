@@ -36,6 +36,7 @@
 #include "Pmd32.h"
 #include "RomModule.h"
 #include "RomMegaModule.h"
+#include "BeckerPort.h"
 #include "Settings.h"
 #include "Debugger.h"
 #include "TapeBrowser.h"
@@ -109,6 +110,7 @@ class TEmulator : public sigslot::has_slots<>
 		Mouse602    *mouse602;
 		Pmd32       *pmd32;
 		RomModule   *romModule;
+		BeckerPort	*beckerPort;
 
 		TComputerModel model;
 		int  monitorLength;
@@ -131,6 +133,7 @@ class TEmulator : public sigslot::has_slots<>
 		void ConnectMIF85(bool init);
 		void ConnectMouse602(bool init);
 		void ConnectPMD32(bool init);
+		void ConnectBeckerPort(bool init);
 		void ProcessSnapshot(char *fileName, BYTE *flag);
 		void PrepareSnapshot(char *fileName, BYTE *flag);
 		void InsertTape(char *fileName, BYTE *flag);

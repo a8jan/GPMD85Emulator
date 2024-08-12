@@ -37,6 +37,7 @@ TEmulator::TEmulator()
 	mouse602 = NULL;
 	pmd32 = NULL;
 	romModule = NULL;
+	beckerPort = NULL;
 	sound = NULL;
 	cpuUsage = 0;
 
@@ -114,6 +115,10 @@ TEmulator::~TEmulator()
 	if (romModule)
 		delete romModule;
 	romModule = NULL;
+
+	if (beckerPort)
+		delete beckerPort;
+	beckerPort = NULL;
 
 	if (mif85)
 		delete mif85;
@@ -380,6 +385,7 @@ void TEmulator::ProcessSettings(BYTE filter)
 		ConnectMIF85(init);
 		ConnectMouse602(init);
 		ConnectPMD32(init);
+		ConnectBeckerPort(init);
 
 		if (init || Settings->Joystick->GPIO0->connected || Settings->Joystick->GPIO1->connected) {
 			joystick->Connect();
@@ -530,6 +536,9 @@ void TEmulator::CpuTimerCallback()
 			GUI->SetLedState(systemPIO->ledState);
 
 	} while (cpu->GetTCycles() < tcpf);
+
+	if (beckerPort)
+		beckerPort->poll();
 
 	cpu->SetTCycles(cpu->GetTCycles() - tcpf);
 	cpuUsage += (SDL_GetTicks() - beg);
@@ -1638,6 +1647,21 @@ void TEmulator::ConnectPMD32(bool init)
 				Settings->PMD32->driveD.image,
 				Settings->PMD32->driveD.writeProtect);
 		}
+	}
+}
+//---------------------------------------------------------------------------
+void TEmulator::ConnectBeckerPort(bool init)
+{
+	if (init) {
+		cpu->RemoveDevice(BECKER_PORT_ADR);
+		if (beckerPort) {
+			delete beckerPort;
+			beckerPort = NULL;
+		}
+
+		beckerPort = new BeckerPort();
+		beckerPort->begin();
+		cpu->AddDevice(BECKER_PORT_ADR, BECKER_PORT_MASK, beckerPort, true);
 	}
 }
 //---------------------------------------------------------------------------

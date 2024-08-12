@@ -34,6 +34,7 @@ libGPMD85emu_core_a_SOURCES = \
 	Pmd32.cpp \
 	RomModule.cpp \
 	RomMegaModule.cpp \
+	BeckerPort.cpp \
 	Settings.cpp \
 	ScreenPMD85.cpp \
 	SoundDriver.cpp \
@@ -69,6 +70,7 @@ noinst_HEADERS = \
 	Pmd32.h \
 	RomModule.h \
 	RomMegaModule.h \
+	BeckerPort.h \
 	Settings.h \
 	ScreenPMD85.h \
 	SoundDriver.h \
