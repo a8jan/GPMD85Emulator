@@ -87,7 +87,7 @@ static uint64_t get_timestamp()
 }
 
 // Constructor
-BeckerPort::BeckerPort() :
+BeckerPort::BeckerPort(RomMegaModule *megaModule):
     _host{0},
     _ip(IPADDR_NONE),
     _port(BECKER_DEFAULT_PORT),
@@ -96,7 +96,8 @@ BeckerPort::BeckerPort() :
     _listen_fd(-1),
     _state(&BeckerStopped::getInstance()),
     _errcount(0),
-    _timestamp_ms(get_timestamp())
+    _timestamp_ms(get_timestamp()),
+    _megaModule(megaModule)
 {
     // pre-allocate buffer
     _tx_buffer.reserve(BECKER_BUFFER_SIZE);
@@ -111,6 +112,8 @@ void BeckerPort::ResetDevice(int ticks)
 {
     debug("BeckerPort", "ResetDevice");
     _tx_buffer.clear();
+    _tmp_buffer.clear();
+    _tmp_buffer.shrink_to_fit();
 }
 
 void BeckerPort::WriteToDevice(BYTE port, BYTE value, int ticks)
@@ -118,11 +121,7 @@ void BeckerPort::WriteToDevice(BYTE port, BYTE value, int ticks)
     if (port == BECKER_DATA_PORT) 
     {
         debug("BeckerPort", "OUT: %02X %c", value, isprint(value) ? value : ' ');
-        // TODO write()
-        if (_tx_buffer.size() < _tx_buffer.capacity())
-            _tx_buffer.push_back(value);
-        else
-            warning("BeckerPort", "TX buffer is full");
+        write(&value, 1);
     }
 }
 
@@ -598,6 +597,7 @@ bool BeckerPort::poll_connection()
     {
         // connection was closed or it has an error
         suspend_on_disconnect();
+        return false;
     }
 
     // send TX buffer
@@ -608,11 +608,154 @@ bool BeckerPort::poll_connection()
         {
             if (result < _tx_buffer.size())
                 _tx_buffer.erase(_tx_buffer.begin(), _tx_buffer.begin()+result);
-            else
+            else 
                 _tx_buffer.clear();
         }
     }
     return false;
+}
+
+bool BeckerPort::poll_rom_upload()
+{
+    if (!connected())
+    {
+        // connection was closed or it has an error
+        suspend_on_disconnect();
+        return false;
+    }
+
+    bool next_poll = false;
+    int remain;
+    ssize_t result;
+    uint8_t rc;
+    switch(_rls)
+    {
+        case RLS::init:
+            _blkno = 0;
+            _offset = 0;
+            _tmp_buffer.clear();
+            _tmp_buffer.shrink_to_fit();
+            _rom_data.clear();
+            _rom_data.shrink_to_fit();
+            // 'R'+128, drive num, sector >> 16, sector >> 8 & 0xFF, sector & 0xFF, 
+            _blk_buffer[0] = 'R'+128;
+            _blk_buffer[1] = 3;
+            _blk_buffer[2] = (_blkno >> 16) & 0xFF;
+            _blk_buffer[3] = (_blkno >> 8) & 0xFF;
+            _blk_buffer[4] = _blkno & 0xFF;
+            _rls = RLS::tx_flush;
+            next_poll = true;
+            break;
+
+        case RLS::tx_flush:
+            if (!_tx_buffer.empty())
+                return poll_connection();
+            _rls = RLS::cmd_send; // send command on next poll
+            next_poll = true;
+            break;
+
+        case RLS::cmd_send:
+            remain = 5 - _offset; // TODO
+            result = write_sock(_blk_buffer + _offset, remain);
+            if (result > 0)
+            {
+                _offset += result;
+                if (_offset == 5)
+                {
+                    debug("BeckerPort", "READ DEVICE 3, BLOCK %d", _blkno);
+                    _offset = 0;
+                    _rls = RLS::blk_recv;
+                    next_poll = true;
+                }
+            }
+            break;
+
+        case RLS::blk_recv:
+            remain = sizeof(_blk_buffer) - _offset; // TODO
+            result = read_sock(_blk_buffer + _offset, remain);
+            if (result > 0)
+            {
+                _offset += result;
+                if (_offset == sizeof(_blk_buffer))
+                {
+                    debug("BeckerPort", "Received block %d", _blkno);
+
+                    // calculate checksum
+                    _cksum = 0;
+                    for (int i=0; i < sizeof(_blk_buffer); i++)
+                        _cksum += _blk_buffer[i];
+                    _cksum = htons(_cksum);
+                    _offset = 0;
+                    _rls = RLS::sum_send;
+                    next_poll = true;
+                }
+            }
+            break;
+        
+        case RLS::sum_send:
+            remain = 2 - _offset;
+            result = write_sock((uint8_t *)(&_cksum) + _offset, remain);
+            if (result > 0)
+            {
+                _offset += result;
+                if (_offset == 2)
+                {
+                    debug("BeckerPort", "Sent checksum %d", ntohs(_cksum));
+                    _offset = 0;
+                    _rls = RLS::rc_recv;
+                    next_poll = true;
+                }
+            }
+            break;
+
+        case RLS::rc_recv:
+            result = read_sock(&rc, 1);
+            if (result > 0)
+            {
+                debug("BeckerPort", "Received RC %d", rc);
+                if (rc == 0)
+                {
+                    _rom_data.insert(_rom_data.end(), &_blk_buffer[0], &_blk_buffer[sizeof(_blk_buffer)]);
+                    //else
+                    {
+                        _blkno++;
+                        _offset = 0;
+                        _blk_buffer[0] = 'R'+128;
+                        _blk_buffer[1] = 3;
+                        _blk_buffer[2] = (_blkno >> 16) & 0xFF;
+                        _blk_buffer[3] = (_blkno >> 8) & 0xFF;
+                        _blk_buffer[4] = _blkno & 0xFF;
+                        _rls = RLS::cmd_send;
+                        next_poll = true;
+                    }
+                }
+                else
+                {
+                    if (rc == 211) // drivewire EOF
+                    {
+                        debug("BeckerPort", "Got ROM Module content");
+                        if (_megaModule && _rom_data.size())
+                        {
+                            _megaModule->LoadRom(_rom_data.size(), _rom_data.data());
+                        }
+                    }
+                    else 
+                    {
+                        debug("BeckerPort", "Error while loading ROM Module content");
+                    }
+                    _tx_buffer = _tmp_buffer;
+                    // cleanup
+                    _tmp_buffer.clear();
+                    _tmp_buffer.shrink_to_fit();
+                    _rom_data.clear();
+                    _rom_data.shrink_to_fit();
+                    // return to connected state
+                    setState(BeckerConnected::getInstance());
+                }
+            }
+            break;
+    }
+    return next_poll;
 }
 
 // timeval BeckerPort::timeval_from_ms(const uint32_t millis)
@@ -623,6 +766,7 @@ bool BeckerPort::poll_connection()
 //   return tv;
 // }
 
+// TODO refactor to getc()
 ssize_t BeckerPort::do_read(uint8_t *buffer, size_t size)
 {
     // int result;
@@ -639,9 +783,13 @@ ssize_t BeckerPort::do_read(uint8_t *buffer, size_t size)
     //         break;
     // }
     // return rxbytes;
-    return read_sock(buffer, size);
+    int result = read_sock(buffer, size);
+    if (result > 0)
+        _monitor.update(buffer[0], true); // TODO this is only one byte
+    return result;
 }
 
+// TODO refactor to putc()
 ssize_t BeckerPort::do_write(const uint8_t *buffer, size_t size)
 {
     // int result;
@@ -658,7 +806,36 @@ ssize_t BeckerPort::do_write(const uint8_t *buffer, size_t size)
     //         break;
     // }
     // return txbytes;
-    return write_sock(buffer, size);
+
+    // return write_sock(buffer, size);
+
+    if (_tx_buffer.size() < _tx_buffer.capacity())
+    {
+        _tx_buffer.push_back(buffer[0]); // TODO !!! this is only one byte
+        if (_monitor.update(buffer[0], false))
+        {
+            debug("BeckerPort", "mount ROM module detected");
+            // enter ROM module loading state
+            _rls = RLS::init;
+            setState(BeckerLoadingROM::getInstance());
+            return poll_rom_upload(); // force first poll
+        }
+    }
+    else
+    {
+        warning("BeckerPort", "TX buffer is full");
+    }
+    return size;
+}
+
+void BeckerPort::putc_tmp(uint8_t c)
+{
+    // TODO some capacity limit on _tmp_buffer
+    // if (_tmp_buffer.size() < _tmp_buffer.capacity())
+    //     _tmp_buffer.push_back(c);
+    // else
+    //     warning("BeckerPort", "TMP buffer is full");
+    _tmp_buffer.push_back(c);
 }
 
 ssize_t BeckerPort::read_sock(const uint8_t *buffer, size_t size)
@@ -956,4 +1133,48 @@ size_t BeckerConnected::read(BeckerPort *port, uint8_t *buffer, size_t size)
 ssize_t BeckerConnected::write(BeckerPort *port, const uint8_t *buffer, size_t size)
 {
     return port->do_write(buffer, size);
+}
+
+// Loading ROM Module using Becker Port
+
+bool BeckerLoadingROM::poll(BeckerPort *port)
+{
+    return port->poll_rom_upload();
+}
+
+size_t BeckerLoadingROM::read(BeckerPort *port, uint8_t *buffer, size_t size)
+{
+    return 0;
+}
+
+ssize_t BeckerLoadingROM::write(BeckerPort *port, const uint8_t *buffer, size_t size)
+{
+    port->putc_tmp(buffer[0]); // TODO this is only one byte
+    return 1;
+}
+
+
+bool BeckerMonitor::update(int value, bool input)
+{
+    int p = pattern[index];
+    int p_dir = p & 0xF00;
+    int p_opt = p & 0xF000;
+    int p_value = p & 0xFF;
+    bool match = false;
+    
+    if (((input && p_dir == ctrl::in) || (!input && p_dir == ctrl::out)) && (p_opt == value::any || p_value == value))
+    {
+        if ((pattern[++index] & 0xF00) == ctrl::stop)
+        {
+            index = 0;
+            match = true;
+            debug("BeckerMonitor", "match!");
+        }
+    }
+    else
+    {
+        index = 0;
+    }
+    // debug("BeckerMonitor", "index=%d", index);
+    return match;
 }

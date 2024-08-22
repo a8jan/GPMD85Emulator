@@ -385,7 +385,6 @@ void TEmulator::ProcessSettings(BYTE filter)
 		ConnectMIF85(init);
 		ConnectMouse602(init);
 		ConnectPMD32(init);
-		ConnectBeckerPort(init);
 
 		if (init || Settings->Joystick->GPIO0->connected || Settings->Joystick->GPIO1->connected) {
 			joystick->Connect();
@@ -397,6 +396,7 @@ void TEmulator::ProcessSettings(BYTE filter)
 			else
 				InsertRomModule(romModuleConnected);
 		}
+		ConnectBeckerPort(init);
 	}
 
 	if (!isActive || (filter & (PS_MACHINE | PS_PERIPHERALS)))
@@ -538,7 +538,7 @@ void TEmulator::CpuTimerCallback()
 	} while (cpu->GetTCycles() < tcpf);
 
 	if (beckerPort)
-		beckerPort->poll();
+		while (beckerPort->poll());
 
 	cpu->SetTCycles(cpu->GetTCycles() - tcpf);
 	cpuUsage += (SDL_GetTicks() - beg);
@@ -1659,7 +1659,7 @@ void TEmulator::ConnectBeckerPort(bool init)
 			beckerPort = NULL;
 		}
 
-		beckerPort = new BeckerPort();
+		beckerPort = new BeckerPort(megaModuleEnabled ? static_cast<RomMegaModule *>(romModule) : NULL);
 		beckerPort->begin();
 		cpu->AddDevice(BECKER_PORT_ADR, BECKER_PORT_MASK, beckerPort, true);
 	}

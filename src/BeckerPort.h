@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "PeripheralDevice.h"
+#include "RomMegaModule.h"
 
 // Becker port using 0x3E and 0x3F 
 #define BECKER_PORT_MASK        0xFE
@@ -90,6 +91,48 @@ private:
 	BeckerSuspended& operator=(const BeckerSuspended& other);
 };
 
+class BeckerLoadingROM : public BeckerState
+{
+public:
+    virtual bool poll(BeckerPort *port) override;
+    virtual size_t read(BeckerPort *port, uint8_t *buffer, size_t size) override;
+    virtual ssize_t write(BeckerPort *port, const uint8_t *buffer, size_t size) override;
+    static BeckerLoadingROM& getInstance() { static BeckerLoadingROM instance; return instance; }
+private:
+	BeckerLoadingROM() {}
+	BeckerLoadingROM(const BeckerLoadingROM& other);
+	BeckerLoadingROM& operator=(const BeckerLoadingROM& other);
+};
+
+
+class BeckerMonitor
+{
+    enum ctrl
+    {
+        out =  0x000,
+        in  =  0x100,
+        stop = 0x200
+    };
+    enum value
+    {
+        any = 0x1000
+    };
+public:
+    bool update(int value, bool input);
+private:
+    int pattern[9] = {
+        ctrl::out | 0xE2,
+        ctrl::out | 0x00,
+        ctrl::in  | 0x01,
+        ctrl::out | 0xE2,
+        ctrl::out | 0xF8,
+        ctrl::out | 0x03,
+        ctrl::out | value::any,
+        ctrl::stop,
+    };
+    int index = 0;
+};
+
 
 class BeckerPort: public PeripheralDevice
 {
@@ -115,6 +158,27 @@ private:
 
     // buffers
     std::vector<uint8_t> _tx_buffer;
+    std::vector<uint8_t> _tmp_buffer;
+
+    BeckerMonitor _monitor;
+    int _blkno;
+    int _offset;
+    uint8_t _blk_buffer[32768];
+    uint16_t _cksum;
+    std::vector<uint8_t> _rom_data;
+    RomMegaModule *_megaModule;
+
+    // Rom Upload State
+    enum RLS
+    {
+        init,
+        tx_flush,
+        cmd_send,
+        blk_recv,
+        sum_send,
+        rc_recv,
+    };
+    int _rls;
 
 protected:
 	void start_connection();
@@ -132,11 +196,13 @@ protected:
 
 	bool connected();
 	bool poll_connection();
+    bool poll_rom_upload();
 
-	// static timeval timeval_from_ms(const uint32_t millis);
+    // static timeval timeval_from_ms(const uint32_t millis);
 
 	ssize_t do_read(uint8_t *buffer, size_t size);
 	ssize_t do_write(const uint8_t *buffer, size_t size);
+    void putc_tmp(uint8_t c);
 
     ssize_t read_sock(const uint8_t *buffer, size_t size);
     ssize_t write_sock(const uint8_t *buffer, size_t size);
@@ -146,7 +212,7 @@ protected:
 
 public:
 
-    BeckerPort();
+    BeckerPort(RomMegaModule *megaModule);
     virtual ~BeckerPort();
 
     virtual void ResetDevice(int ticks) override;
@@ -180,6 +246,7 @@ public:
     friend class BeckerConnecting;
     friend class BeckerConnected;
     friend class BeckerSuspended;
+    friend class BeckerLoadingROM;
 };
 
 #endif // DWBECKER_H
